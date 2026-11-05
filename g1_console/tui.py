@@ -29,6 +29,26 @@ MODE_MENU = [
 ]
 
 
+
+def disp_len(s):
+    """Display width: CJK/fullwidth chars take 2 terminal columns."""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1
+               for c in s)
+
+
+def truncate_w(s, width):
+    """Truncate s to at most *width* display columns."""
+    import unicodedata
+    out, w = [], 0
+    for c in s:
+        cw = 2 if unicodedata.east_asian_width(c) in "WF" else 1
+        if w + cw > width:
+            break
+        out.append(c)
+        w += cw
+    return "".join(out)
+
 class LogBus:
     def __init__(self, n=LOG_MAX):
         self.buf = deque(maxlen=n)
@@ -85,9 +105,10 @@ class TuiApp:
     def draw(self, scr):
         scr.erase()
         h, w = scr.getmaxyx()
-        if h < 20 or w < 80:
+        if h < 16 or w < 50:
             try:
-                scr.addstr(0, 0, f"terminal too small: {w}x{h} (need >=80x20)")
+                scr.addstr(0, 0, f"terminal too small: {w}x{h} (need >=50x16); "
+                                 f"zoom out (Ctrl+-) or enlarge the window")
             except curses.error:
                 pass
             return
@@ -97,18 +118,69 @@ class TuiApp:
 
         footer_h = 3  # last-command line + axes + key help
         body_h = h - 1 - footer_h
-        log_h = max(7, body_h * 2 // 5)
+        log_h = max(6, body_h * 2 // 5)
         tele_h = body_h - log_h
 
         self._draw_header(scr, 0, w, link, video, safety)
-        self._panel(scr, 1, 0, tele_h, w, "telemetry")
-        self._draw_telemetry(scr, 1, w, tele_h, tele, video)
+        if w >= 100:
+            left_w = min(46, max(34, w // 3))
+            self._panel(scr, 1, 0, tele_h, left_w, "telemetry")
+            self._draw_telemetry(scr, 1, left_w, tele_h, tele, video)
+            key_x, key_w = left_w - 1, w - left_w + 1
+            self._panel(scr, 1, key_x, tele_h, key_w, "keys & safety")
+            self._draw_keys(scr, 1, key_x, tele_h, key_w, safety)
+        else:
+            self._panel(scr, 1, 0, tele_h, w, "telemetry")
+            self._draw_telemetry(scr, 1, w, tele_h, tele, video)
         self._panel(scr, 1 + tele_h, 0, log_h, w, "log (l: clear)")
         self._draw_log(scr, 1 + tele_h, w, log_h - 2)
         self._draw_lastcmd(scr, h - footer_h, w)
         self._draw_footer(scr, h - footer_h + 1, w, safety)
         if self.overlay:
             self._draw_overlay(scr, h, w)
+
+    def _draw_keys(self, scr, y, x, width, height, safety):
+        rows = [
+            ("M", "模式菜单 walk/run/stop…"),
+            ("W A S D", "移动 (ly/lx)"),
+            ("E / R", "转向 (rx)"),
+            ("+ / -", "速度档位"),
+            ("SPACE", "急停 (零速+StopMove)"),
+            ("P", "立即发送当前轴"),
+            ("A", "解锁真实控制(输 ARM-G1)"),
+            ("X", "上锁"),
+            ("V", "视频流开关(计数)"),
+            ("J", "关节角度明细"),
+            ("C", "连接/断开"),
+            ("L / Q", "清log / 退出"),
+        ]
+        sw = self.link.safety
+        if sw.state == "ARMED":
+            state_line = f"ARMED {sw.seconds_left():.0f}s — 指令将真实发送"
+            color = 2
+        elif sw.allow_real_control:
+            state_line = "LOCKED — 指令DRY-RUN；A+ARM-G1 解锁"
+            color = 3
+        else:
+            state_line = "DISABLED — 全部DRY-RUN，不操控机器人"
+            color = 4
+        row = y + 1
+        end = y + height - 1
+
+        def put(text, c=0, bold=False):
+            nonlocal row
+            if row < end:
+                try:
+                    scr.addstr(row, x + 2, text[: width - 3],
+                               self._cattr(c, bold))
+                except curses.error:
+                    pass
+                row += 1
+
+        put(f"真实控制: {state_line}", color, bold=True)
+        row += 1
+        for k, d in rows:
+            put(f"{k:<8} {d}")
 
     @staticmethod
     def _panel(scr, y, x, h, w, title=""):
@@ -231,7 +303,7 @@ class TuiApp:
         try:
             if self.flash and self.flash[0] > time.time():
                 ts, text, color = self.flash
-                scr.addstr(y, 0, (" ✎ " + text)[: w - 1],
+                scr.addstr(y, 0, truncate_w(" ✎ " + text, w - 1),
                            self._cattr(color, bold=True, reverse=True))
             else:
                 self.flash = None
@@ -293,7 +365,7 @@ class TuiApp:
 
     @staticmethod
     def _box(scr, h, w, lines, color):
-        bw = max(len(l) for l in lines) + 8
+        bw = min(w - 2, max(disp_len(l) for l in lines) + 8)
         bh = len(lines) + 4
         y0, x0 = max(0, (h - bh) // 2), max(0, (w - bw) // 2)
         # solid background then frame
@@ -305,7 +377,7 @@ class TuiApp:
         TuiApp._panel(scr, y0, x0, bh, bw)
         for i, l in enumerate(lines):
             try:
-                scr.addstr(y0 + 2 + i, x0 + 4, l[: bw - 6],
+                scr.addstr(y0 + 2 + i, x0 + 4, truncate_w(l, bw - 6),
                            curses.color_pair(color) | curses.A_BOLD)
             except curses.error:
                 pass

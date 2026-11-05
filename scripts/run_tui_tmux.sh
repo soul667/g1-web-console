@@ -35,6 +35,9 @@ stop_all
 tmux new-session -d -s "$SESSION" -x "${G1_TMUX_W:-160}" -y "${G1_TMUX_H:-44}" \
   "cd ${DIR} && G1_CONSOLE_ALLOW_REAL_CONTROL=${G1_CONSOLE_ALLOW_REAL_CONTROL:-0} \
 ${VENV}/bin/python -m g1_console.tui 2>/tmp/g1tui_stderr.log; echo 'TUI exited — press Enter to close'; read"
+# -x/-y fixes the window size (manual); switch back to `latest` so a browser
+# client attaching via ttyd resizes the window to fit (no dead dotted area).
+tmux set-window-option -t "$SESSION" window-size latest 2>/dev/null || true
 
 # ttyd: writable (interaction), basic auth, attaches to the same tmux session
 if [ ! -x "$TTYD_BIN" ]; then
