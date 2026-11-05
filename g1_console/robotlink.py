@@ -93,12 +93,14 @@ class RobotLink:
     def __init__(self, ip: str, aes_key: Optional[str] = None,
                  safety: Optional[SafetySwitch] = None,
                  auto_reconnect: bool = True,
-                 on_event: Optional[Callable[[str, str], None]] = None):
+                 on_event: Optional[Callable[[str, str], None]] = None,
+                 ascii_preview: bool = True):
         self.ip = ip
         self.aes_key = aes_key
         self.safety = safety or SafetySwitch()
         self.auto_reconnect = auto_reconnect
         self.on_event = on_event or (lambda kind, msg: None)
+        self.ascii_preview = ascii_preview
 
         self.state = LinkState(robot_ip=ip)
         self.telemetry = {t: TelemetrySlot() for t in TELEMETRY_TOPICS}
@@ -345,11 +347,11 @@ class RobotLink:
                 dt = now - self.video.last_ts if self.video.last_ts else 0.1
                 self._fps_ema = (self._fps_ema * 0.8 +
                                  (1.0 / max(dt, 1e-3)) * 0.2) if dt < 5 else 0.0
-                small = cv2.resize(
+                small = (cv2.resize(
                     frame.to_ndarray(format="gray"),
                     (VIDEO_ASCII_W, VIDEO_ASCII_H // 2),
                     interpolation=cv2.INTER_AREA,
-                ) if _has_cv2() else None
+                ) if self.ascii_preview and _has_cv2() else None)
                 with self._lock:
                     self.video.frames += 1
                     self.video.width = frame.width

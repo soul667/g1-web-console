@@ -30,8 +30,11 @@ stop_all
 
 # TUI inside a persistent tmux session (ttyd clients attach to it).
 # stderr (ffmpeg/aiortc warnings) goes to a file so it can't garble the UI.
+# Pass the safety env explicitly: the tmux server may not inherit this shell's
+# environment. Real control needs BOTH this env =1 and the in-TUI ARM-G1 step.
 tmux new-session -d -s "$SESSION" -x "${G1_TMUX_W:-160}" -y "${G1_TMUX_H:-44}" \
-  "cd ${DIR} && ${VENV}/bin/python -m g1_console.tui 2>/tmp/g1tui_stderr.log; echo 'TUI exited — press Enter to close'; read"
+  "cd ${DIR} && G1_CONSOLE_ALLOW_REAL_CONTROL=${G1_CONSOLE_ALLOW_REAL_CONTROL:-0} \
+${VENV}/bin/python -m g1_console.tui 2>/tmp/g1tui_stderr.log; echo 'TUI exited — press Enter to close'; read"
 
 # ttyd: writable (interaction), basic auth, attaches to the same tmux session
 if [ ! -x "$TTYD_BIN" ]; then

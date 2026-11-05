@@ -16,7 +16,7 @@ from collections import deque
 from .robotlink import RobotLink, SPORT_MODES
 from .safety import SafetySwitch, ARM_CODE
 
-ASCII_RAMP = " .:-=+*#%@"
+ASCII_RAMP = " .:-=+*#%@"  # reserved (ascii preview removed from TUI)
 SEND_HZ = 10.0
 LOG_MAX = 400
 MODE_MENU = [
@@ -69,6 +69,7 @@ class TuiApp:
         self.show_joints = False
         self.last_send_t = 0.0
         self.overlay = None  # None | ("mode",) | ("arm", str)
+        self.flash = None    # (expiry_ts, text, color) — last-command feedback
 
     # ── drawing helpers ──────────────────────────────────────────────
 
@@ -94,21 +95,18 @@ class TuiApp:
         link, video, safety = snap["link"], snap["video"], snap["safety"]
         tele = snap["telemetry"]
 
-        footer_h = 2
+        footer_h = 3  # last-command line + axes + key help
         body_h = h - 1 - footer_h
-        left_w = min(44, max(30, w // 3))
-        log_h = max(6, body_h // 3)
+        log_h = max(7, body_h * 2 // 5)
         tele_h = body_h - log_h
 
         self._draw_header(scr, 0, w, link, video, safety)
-        self._panel(scr, 1, 0, tele_h, left_w, "telemetry")
-        self._draw_telemetry(scr, 1, left_w, tele_h, tele, video)
-        vid_x, vid_w = left_w - 1, w - left_w + 1
-        self._panel(scr, 1, vid_x, tele_h, vid_w, "camera (v: toggle)")
-        self._draw_video(scr, 1, vid_x, tele_h, vid_w)
+        self._panel(scr, 1, 0, tele_h, w, "telemetry")
+        self._draw_telemetry(scr, 1, w, tele_h, tele, video)
         self._panel(scr, 1 + tele_h, 0, log_h, w, "log (l: clear)")
         self._draw_log(scr, 1 + tele_h, w, log_h - 2)
-        self._draw_footer(scr, h - footer_h, w, safety)
+        self._draw_lastcmd(scr, h - footer_h, w)
+        self._draw_footer(scr, h - footer_h + 1, w, safety)
         if self.overlay:
             self._draw_overlay(scr, h, w)
 
@@ -227,30 +225,21 @@ class TuiApp:
             put(f"{topic.split('/')[-1]}: {cnt} msgs, age {age:.1f}s", 6
                 if age < 3 else 4)
 
-    def _draw_video(self, scr, y, x, height, width):
-        small = None
+    def _draw_lastcmd(self, scr, y, w):
+        """Persistent last-command feedback line so every key press is
+        visibly acknowledged (ttyd browsers may otherwise feel dead)."""
         try:
-            small = self.link.video.small
-        except AttributeError:
+            if self.flash and self.flash[0] > time.time():
+                ts, text, color = self.flash
+                scr.addstr(y, 0, (" ✎ " + text)[: w - 1],
+                           self._cattr(color, bold=True, reverse=True))
+            else:
+                self.flash = None
+                scr.addstr(y, 0,
+                           " M 模式菜单 · WASD 移动 · SPACE 停止 · A 解锁 · v 视频流"
+                           [: w - 1], self._cattr(0, reverse=True))
+        except curses.error:
             pass
-        if small is None:
-            try:
-                scr.addstr(y + 2, x + 4, "no frames", self._cattr(4))
-            except curses.error:
-                pass
-            return
-        sh, sw = small.shape
-        inner_y, inner_x = y + 1, x + 1
-        inner_h, inner_w = height - 2, width - 2
-        for cy in range(inner_h):
-            sy = min(sh - 1, int(cy * sh / max(1, inner_h)))
-            line = "".join(
-                ASCII_RAMP[min(9, small[sy, min(sw - 1, int(cx * sw / max(1, inner_w)))] * 10 // 256)]
-                for cx in range(inner_w))
-            try:
-                scr.addstr(inner_y + cy, inner_x, line)
-            except curses.error:
-                pass
 
     def _draw_log(self, scr, y, width, nrows):
         entries = list(self.bus.buf)[-nrows:]
@@ -273,17 +262,24 @@ class TuiApp:
                        f"dry={safety['dry_runs']} real={safety['real_publishes']}"[: w - 1],
                        self._cattr(0, reverse=True))
             scr.addstr(y + 1, 0,
-                       " WASD move  E/R turn  +/- speed  SPACE stop  P send  "
-                       "M modes  V video  C conn  A arm  X disarm  J joints  "
-                       "L clear  Q quit"[: w - 1],
+                       " M 模式菜单  WASD move  E/R turn  +/- speed  SPACE stop"
+                       "  P send  A arm  X disarm  J joints  V video流  C conn"
+                       "  L clear  Q quit"[: w - 1],
                        self._cattr(0, reverse=True))
         except curses.error:
             pass
 
     def _draw_overlay(self, scr, h, w):
         if self.overlay[0] == "mode":
-            lines = ["mode request (rt/api/sport/request):"] + [
-                f"  [{k}] {name}" for k, name, _ in MODE_MENU]
+            sw = self.link.safety
+            lines = ["mode request (rt/api/sport/request):"]
+            if sw.state == "ARMED":
+                lines.append(f"  safety=ARMED ({sw.seconds_left():.0f}s) — 请求将真实发送!")
+            elif sw.allow_real_control:
+                lines.append("  safety=enabled but LOCKED — 请求仅记录(DRY-RUN)，A 解锁后真发")
+            else:
+                lines.append("  safety=DISABLED — 请求仅记录(DRY-RUN)，不操控机器人")
+            lines += [f"  [{k}] {name}" for k, name, _ in MODE_MENU]
             lines.append("  ESC cancel")
             self._box(scr, h, w, lines, 8)
         elif self.overlay[0] == "arm":
@@ -346,11 +342,15 @@ class TuiApp:
                 ax[k] = 0.0
             self.link.estop()
         elif ch in (ord("p"), ord("P")):
-            self.link.send_velocity(ax["lx"], ax["ly"], ax["rx"], ax["ry"])
+            dec = self.link.send_velocity(ax["lx"], ax["ly"], ax["rx"], ax["ry"])
+            self._flash_decision("velocity", dec)
         elif ch in (ord("m"), ord("M")):
             self.overlay = ("mode",)
         elif ch in (ord("v"), ord("V")):
-            self.link.set_video(not self.link.snapshot()["link"]["video_on"])
+            on = not self.link.snapshot()["link"]["video_on"]
+            self.link.set_video(on)
+            self.flash = (time.time() + 3,
+                          f"video stream {'on' if on else 'off'} (no rendering in TUI)", 6)
         elif ch in (ord("c"), ord("C")):
             if self.link.snapshot()["link"]["status"] == "connected":
                 self.link.disconnect()
@@ -360,10 +360,20 @@ class TuiApp:
             self.show_joints = not self.show_joints
         elif ch in (ord("l"), ord("L")):
             self.bus.buf.clear()
+            self.flash = (time.time() + 3, "log cleared", 6)
         elif ch == ord("x") or ch == ord("X"):
             self.link.safety.disarm()
             self.bus.push("link", "disarmed")
+            self.flash = (time.time() + 3, "safety disarmed (LOCKED)", 3)
         return None
+
+    def _flash_decision(self, what, dec):
+        mode = dec.get("mode", "?")
+        tag = {"dry_run": "DRY-RUN 已记录(未发送)",
+               "locked": "BLOCKED(未解锁)",
+               "real": "已真实发送!"}.get(mode, mode)
+        self.flash = (time.time() + 3, f"{what}: {tag}",
+                      2 if mode == "real" else 3)
 
     def _handle_overlay_key(self, ch):
         kind = self.overlay[0]
@@ -373,8 +383,14 @@ class TuiApp:
             for k, name, api in MODE_MENU:
                 if ch == ord(k):
                     self.overlay = None
-                    self.bus.push("cmd", f"mode request -> {name}")
-                    self.link.send_sport_request(api)
+                    dec = self.link.send_sport_request(api)
+                    mode = dec.get("mode", "?")
+                    tag = {"dry_run": "DRY-RUN 已记录(未发送)",
+                           "locked": "BLOCKED(未解锁)",
+                           "real": "已真实发送!"}.get(mode, mode)
+                    self.flash = (time.time() + 5,
+                                  f"mode → {name} (api_id={api}): {tag}",
+                                  2 if mode == "real" else 3)
                     return None
         elif kind == "arm":
             txt = self.overlay[1]
@@ -385,6 +401,10 @@ class TuiApp:
                 self.bus.push("link", "ARMED" if ok else
                               "arm failed (check code / env / window)")
                 self.overlay = None
+                self.flash = (time.time() + 5,
+                              "ARMED — real control ON" if ok else
+                              "arm FAILED: 需要 env G1_CONSOLE_ALLOW_REAL_CONTROL=1 且输入 ARM-G1",
+                              2 if ok else 1)
                 return None
             elif 32 <= ch < 127:
                 txt += chr(ch)
@@ -433,15 +453,25 @@ def main(stdscr, args):
         curses.init_pair(i, i, -1)
 
     bus = LogBus()
+
+    def on_event(kind, msg):
+        # continuous velocity dry-runs would flood the log — collapse them
+        if kind == "dry_run" and msg.startswith("DRY-RUN velocity"):
+            bus.push_throttled("vel", kind, msg, min_interval=2.0)
+        else:
+            bus.push(kind, msg)
+
     safety = SafetySwitch()
     link = RobotLink(
         ip=args.ip, aes_key=args.aes_key, safety=safety,
-        on_event=lambda kind, msg: bus.push(kind, msg))
+        on_event=on_event, ascii_preview=False)
     app = TuiApp(link, bus)
 
     stdscr.nodelay(True)
     stdscr.timeout(50)
-    link.set_video(True)
+    # video stream off by default (no ASCII rendering in the TUI);
+    # press v to enable the stream and watch frames/fps counters.
+    link.set_video(os.environ.get("G1_TUI_VIDEO", "0") == "1")
     link.start()
     bus.push("link", f"TUI started, robot={args.ip}, "
                      f"real control {'ENABLED' if safety.allow_real_control else 'disabled'}")
