@@ -61,16 +61,35 @@ Firmware ≥ 1.5.1 speaks `data2=3` and additionally needs the per-device
 AES key (`G1_AES_128_KEY`, see upstream docs); our G1 runs legacy auth and
 connects without any key.
 
+### Operating sequence (real control)
+
+The G1 is an FSM: velocity axes only work **after** switching to a
+locomotion state. Mode = `SET_FSM_ID` (api 7101) on `rt/api/sport/request`;
+the active state echoes back as `fsm_id` in the telemetry panel.
+
+```
+1. start server with G1_CONSOLE_ALLOW_REAL_CONTROL=1   (run_tui_tmux.sh forwards it)
+2. press A, type ARM-G1, Enter        → 60 s arm window (press A again to extend)
+3. press M then 1                      → FSM 500 walk (robot stands & enters walk)
+   (501 walk+waist, 801 run)
+4. W A S D / E R                       → drive (auto-sent at 10 Hz while non-zero)
+5. SPACE                               → zero the axes
+6. X                                   → relock immediately
+```
+
+Watch `fsm_id` in the telemetry panel: `0` = zero-torque default, and WASD
+does nothing until it reads 500/501/801.
+
 ### Keys
 
 | key | action |
 |-----|--------|
+| `M` | mode menu (FSM 500/501/801) |
 | `W A S D` | move (ly / lx), sticky axes |
 | `E` / `R` | turn (rx) |
 | `+` / `-` | speed scale |
-| `Space` | STOP (zero velocity + StopMove 1003) |
+| `Space` | STOP (zero the axes) |
 | `P` | send current axes once |
-| `M` | mode menu (walk 500 / waist 501 / run 801 / stop 1003 / stand 1004/1005) |
 | `V` | camera on/off |
 | `J` | per-joint q values |
 | `A` / `X` | arm / disarm real control |

@@ -13,20 +13,19 @@ import threading
 import time
 from collections import deque
 
-from .robotlink import RobotLink, SPORT_MODES
+from .robotlink import RobotLink, G1_FSM
 from .safety import SafetySwitch, ARM_CODE
 
 ASCII_RAMP = " .:-=+*#%@"  # reserved (ascii preview removed from TUI)
 SEND_HZ = 10.0
 LOG_MAX = 400
+# (key, label, api_id, parameter.data) — G1 FSM via SET_FSM_ID 7101
 MODE_MENU = [
-    ("1", "walk", 500),
-    ("2", "walk_waist", 501),
-    ("3", "run (801)", 801),
-    ("0", "stop_move", 1003),
-    ("u", "stand_up", 1004),
-    ("d", "stand_down", 1005),
+    ("1", "walk  站立行走 (FSM 500)", 7101, 500),
+    ("2", "walk+waist 腰部跟随 (FSM 501)", 7101, 501),
+    ("3", "run 跑步 (FSM 801)", 7101, 801),
 ]
+OPERATING_ORDER = "操作顺序: M→1 切walk → WASD 移动 → SPACE 停 → X 上锁"
 
 
 
@@ -141,11 +140,12 @@ class TuiApp:
 
     def _draw_keys(self, scr, y, x, width, height, safety):
         rows = [
-            ("M", "模式菜单 walk/run/stop…"),
+            ("操作", "M→1 切walk → WASD → SPACE 停 → X 锁"),
+            ("M", "模式菜单 walk/waist/run"),
             ("W A S D", "移动 (ly/lx)"),
             ("E / R", "转向 (rx)"),
             ("+ / -", "速度档位"),
-            ("SPACE", "急停 (零速+StopMove)"),
+            ("SPACE", "急停 (摇杆归零)"),
             ("P", "立即发送当前轴"),
             ("A", "解锁真实控制(输 ARM-G1)"),
             ("X", "上锁"),
@@ -344,14 +344,15 @@ class TuiApp:
     def _draw_overlay(self, scr, h, w):
         if self.overlay[0] == "mode":
             sw = self.link.safety
-            lines = ["mode request (rt/api/sport/request):"]
+            lines = ["G1 模式 = FSM 状态 (SET_FSM_ID 7101):"]
             if sw.state == "ARMED":
                 lines.append(f"  safety=ARMED ({sw.seconds_left():.0f}s) — 请求将真实发送!")
             elif sw.allow_real_control:
                 lines.append("  safety=enabled but LOCKED — 请求仅记录(DRY-RUN)，A 解锁后真发")
             else:
                 lines.append("  safety=DISABLED — 请求仅记录(DRY-RUN)，不操控机器人")
-            lines += [f"  [{k}] {name}" for k, name, _ in MODE_MENU]
+            lines += [f"  [{k}] {name}" for k, name, _, _ in MODE_MENU]
+            lines.append("  切换后观察左上 fsm_id: 0→500/501/801, 之后 WASD 才生效")
             lines.append("  ESC cancel")
             self._box(scr, h, w, lines, 8)
         elif self.overlay[0] == "arm":
@@ -452,16 +453,16 @@ class TuiApp:
         if ch == 27:  # ESC
             self.overlay = None
         elif kind == "mode":
-            for k, name, api in MODE_MENU:
+            for k, name, api, data in MODE_MENU:
                 if ch == ord(k):
                     self.overlay = None
-                    dec = self.link.send_sport_request(api)
+                    dec = self.link.send_sport_request(api, data)
                     mode = dec.get("mode", "?")
                     tag = {"dry_run": "DRY-RUN 已记录(未发送)",
                            "locked": "BLOCKED(未解锁)",
-                           "real": "已真实发送!"}.get(mode, mode)
+                           "real": "已真实发送! 看左上 fsm_id 变化"}.get(mode, mode)
                     self.flash = (time.time() + 5,
-                                  f"mode → {name} (api_id={api}): {tag}",
+                                  f"SET_FSM {name} (7101<-{data}): {tag}",
                                   2 if mode == "real" else 3)
                     return None
         elif kind == "arm":

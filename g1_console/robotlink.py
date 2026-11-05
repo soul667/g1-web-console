@@ -35,15 +35,19 @@ TELEMETRY_TOPICS = [
     "rt/lf/secondary_imu",
 ]
 
-# rt/api/sport/request api_id values (G1). See upstream constants.py.
-SPORT_MODES = {
-    "walk": 500,        # walking
-    "walk_waist": 501,  # walking with waist control
-    "run": 801,         # running (G1 FSM "Run")
-    "stop_move": 1003,
-    "stand_up": 1004,
-    "stand_down": 1005,
-    "damp": 1001,
+# G1 humanoid control = one FSM on rt/api/sport/request.
+# SET_FSM_ID (7101) + parameter {"data": <fsm_id>} switches state;
+# the robot echoes the active id back as `fsm_id` in rt/lf/sportmodestate.
+# (Verified against upstream examples: 500 Walk, 501 Walk+waist, 801 Run.
+# Go2 SPORT_CMD ids like 1003/1004 do NOT apply to the humanoids.)
+LOCO_SET_FSM_ID = 7101
+LOCO_GET_FSM_ID = 7001
+LOCO_SET_VELOCITY = 7105  # {"velocity": [vx, vy, omega], "duration": s}
+
+G1_FSM = {
+    "walk": 500,
+    "walk_waist": 501,
+    "run": 801,
 }
 
 VIDEO_ASCII_W = 96   # chars
@@ -221,11 +225,18 @@ class RobotLink:
             "sport_request", lambda: self._call_async(_do()).result(timeout=10),
             detail=f"api_id={api_id} data={data}")
 
+    def set_fsm(self, fsm_id: int) -> dict:
+        """Switch the G1 FSM state (SET_FSM_ID 7101)."""
+        return self.send_sport_request(LOCO_SET_FSM_ID, fsm_id)
+
+    def get_fsm(self) -> dict:
+        """Query the active FSM id (GET_FSM_ID 7001)."""
+        return self.send_sport_request(LOCO_GET_FSM_ID)
+
     def estop(self) -> dict:
-        """STOP command: zero velocity + StopMove request (1003)."""
-        a = self.send_velocity(0, 0, 0, 0)
-        b = self.send_sport_request(SPORT_MODES["stop_move"])
-        return {"velocity": a, "sport": b}
+        """STOP: zero the virtual joystick. (Velocity axes are what the
+        walk FSM consumes; there is no Go2-style StopMove api on G1.)"""
+        return self.send_velocity(0, 0, 0, 0)
 
     def _publish_guarded(self, action: str, publish, detail: str = "") -> dict:
         decision = self.safety.guard(action)
