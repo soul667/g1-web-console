@@ -42,7 +42,17 @@ TELEMETRY_TOPICS = [
 # Go2 SPORT_CMD ids like 1003/1004 do NOT apply to the humanoids.)
 LOCO_SET_FSM_ID = 7101
 LOCO_GET_FSM_ID = 7001
+LOCO_GET_FSM_MODE = 7002
 LOCO_SET_VELOCITY = 7105  # {"velocity": [vx, vy, omega], "duration": s}
+
+# SET_FSM_ID refusal codes returned by the on-robot handler (upstream
+# constants.LOCO_FSM_ERRORS). The firmware enforces a per-state white/
+# blacklist; Damping is the only state reachable from everywhere.
+LOCO_FSM_ERRORS = {
+    1001: "状态切换被固件白名单拒绝(当前状态不允许到目标态)",
+    1002: "状态切换被固件白名单拒绝(当前状态不允许到目标态)",
+    1003: "无效 fsm id — 该固件没有这个状态",
+}
 
 G1_FSM = {
     "walk": 500,
@@ -211,8 +221,11 @@ class RobotLink:
             ),
             detail=f"lx={lx:+.2f} ly={ly:+.2f} rx={rx:+.2f} ry={ry:+.2f}")
 
-    def send_sport_request(self, api_id: int, data=None) -> dict:
-        """RPC on rt/api/sport/request (mode switches etc.)."""
+    def send_sport_request(self, api_id: int, data=None,
+                           readonly: bool = False) -> dict:
+        """RPC on rt/api/sport/request (mode switches / queries). The robot's
+        response dict (if any) is captured into ``response``; SET_FSM_ID
+        refusal codes are surfaced as ``fsm_error``."""
         payload = {"api_id": api_id}
         if data is not None:
             payload["parameter"] = {"data": data}
@@ -222,27 +235,69 @@ class RobotLink:
                 "rt/api/sport/request", payload)
 
         return self._publish_guarded(
-            "sport_request", lambda: self._call_async(_do()).result(timeout=10),
-            detail=f"api_id={api_id} data={data}")
+            "sport_request",
+            lambda: self._call_async(_do()).result(timeout=10),
+            detail=f"api_id={api_id} data={data}", readonly=readonly)
 
     def set_fsm(self, fsm_id: int) -> dict:
         """Switch the G1 FSM state (SET_FSM_ID 7101)."""
         return self.send_sport_request(LOCO_SET_FSM_ID, fsm_id)
 
     def get_fsm(self) -> dict:
-        """Query the active FSM id (GET_FSM_ID 7001)."""
-        return self.send_sport_request(LOCO_GET_FSM_ID)
+        """Query the active FSM id (GET_FSM_ID 7001) — read-only, so it is
+        allowed even while the safety switch is LOCKED (a query cannot
+        actuate anything)."""
+        return self.send_sport_request(LOCO_GET_FSM_ID, readonly=True)
 
     def estop(self) -> dict:
         """STOP: zero the virtual joystick. (Velocity axes are what the
         walk FSM consumes; there is no Go2-style StopMove api on G1.)"""
         return self.send_velocity(0, 0, 0, 0)
 
-    def _publish_guarded(self, action: str, publish, detail: str = "") -> dict:
+    @staticmethod
+    def _deep_find(resp, key):
+        """Recursively search an RPC response (dict / JSON string) for key."""
+        try:
+            if isinstance(resp, str):
+                resp = json.loads(resp)
+        except (ValueError, TypeError):
+            return None
+        stack = [resp]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, dict):
+                for k, v in cur.items():
+                    if k == key:
+                        return v
+                    stack.append(v)
+            elif isinstance(cur, list):
+                stack.extend(cur)
+        return None
+
+    def _publish_guarded(self, action: str, publish, detail: str = "",
+                         readonly: bool = False) -> dict:
+        if readonly:
+            # queries cannot actuate the robot — bypass the safety gate
+            try:
+                resp = publish()
+                self.on_event("link", f"QUERY {action} {detail} "
+                                      f"-> {self._summarize(resp)}")
+                return {"allowed": True, "mode": "query", "response": resp}
+            except Exception as e:  # noqa: BLE001
+                self.on_event("error", f"query failed: {e}")
+                return {"allowed": False, "mode": "error", "reason": str(e)}
         decision = self.safety.guard(action)
         if decision["allowed"]:
             try:
-                publish()
+                resp = publish()
+                decision["response"] = resp
+                code = self._deep_find(resp, "code")
+                if code not in (None, 0):
+                    decision["fsm_error"] = LOCO_FSM_ERRORS.get(
+                        code, f"error code {code}")
+                    self.on_event("error", f"REAL {action} {detail} "
+                                           f"-> {decision['fsm_error']}")
+                    return decision
                 self.on_event("real_publish", f"REAL {action} {detail}")
                 return decision
             except Exception as e:  # noqa: BLE001
@@ -251,6 +306,24 @@ class RobotLink:
         self.on_event("dry_run", f"DRY-RUN {action} {detail} "
                                  f"({decision['reason']})")
         return decision
+
+    @staticmethod
+    def _summarize(resp) -> str:
+        try:
+            if isinstance(resp, str):
+                resp = json.loads(resp)
+            if isinstance(resp, dict):
+                data = resp.get("data", resp)
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except (ValueError, TypeError):
+                        pass
+                s = json.dumps(data, default=str)
+                return s[:120]
+        except (ValueError, TypeError):
+            pass
+        return str(resp)[:120]
 
     # ── background asyncio machinery ─────────────────────────────────
 

@@ -142,6 +142,7 @@ class TuiApp:
         rows = [
             ("操作", "M→1 切walk → WASD → SPACE 停 → X 锁"),
             ("M", "模式菜单 walk/waist/run"),
+            ("G", "查询FSM状态(只读,免解锁)"),
             ("W A S D", "移动 (ly/lx)"),
             ("E / R", "转向 (rx)"),
             ("+ / -", "速度档位"),
@@ -429,6 +430,12 @@ class TuiApp:
                 self.link.disconnect()
             else:
                 self.link.start()
+        elif ch in (ord("g"), ord("G")):
+            dec = self.link.get_fsm()
+            info = (self.link._summarize(dec["response"])
+                    if dec.get("response") else
+                    dec.get("reason", "no response"))
+            self.flash = (time.time() + 6, f"FSM查询(只读): {info}", 6)
         elif ch in (ord("j"), ord("J")):
             self.show_joints = not self.show_joints
         elif ch in (ord("l"), ord("L")):
@@ -458,12 +465,17 @@ class TuiApp:
                     self.overlay = None
                     dec = self.link.send_sport_request(api, data)
                     mode = dec.get("mode", "?")
+                    err = dec.get("fsm_error")
                     tag = {"dry_run": "DRY-RUN 已记录(未发送)",
                            "locked": "BLOCKED(未解锁)",
-                           "real": "已真实发送! 看左上 fsm_id 变化"}.get(mode, mode)
-                    self.flash = (time.time() + 5,
+                           "real": "已真实发送! 看左上 fsm_id 变化",
+                           "error": "发送失败"}.get(mode, mode)
+                    if err:
+                        tag = f"机器人拒绝: {err}"
+                    self.flash = (time.time() + 6,
                                   f"SET_FSM {name} (7101<-{data}): {tag}",
-                                  2 if mode == "real" else 3)
+                                  1 if (err or mode == "error")
+                                  else 2 if mode == "real" else 3)
                     return None
         elif kind == "arm":
             txt = self.overlay[1]
